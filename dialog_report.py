@@ -1,0 +1,539 @@
+from collections import defaultdict
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
+from supabase_db import supabase
+
+KYIV_TZ = ZoneInfo("Europe/Kyiv")
+
+
+def parse_dt(value):
+    if isinstance(value, datetime):
+        return value
+
+    if not value:
+        return None
+
+    value = str(value).replace("Z", "+00:00")
+
+    try:
+        return datetime.fromisoformat(value)
+    except Exception:
+        return None
+
+
+def fetch_messages_paginated(start_time, end_time, account_session_name=None):
+    start_iso = start_time.astimezone(KYIV_TZ).isoformat()
+    end_iso = end_time.astimezone(KYIV_TZ).isoformat()
+
+    all_rows = []
+    page_size = 1000
+    offset = 0
+
+    while True:
+        query = (
+            supabase.table("telegram_messages")
+            .select("*")
+            .gte("message_date", start_iso)
+            .lt("message_date", end_iso)
+            .order("message_date", desc=False)
+        )
+
+        if account_session_name:
+            query = query.eq("account_session_name", account_session_name)
+
+        result = query.range(offset, offset + page_size - 1).execute()
+        rows = result.data or []
+
+        all_rows.extend(rows)
+
+        if len(rows) < page_size:
+            break
+
+        offset += page_size
+
+    return all_rows
+
+
+def load_messages(start_time, end_time):
+    return fetch_messages_paginated(start_time, end_time)
+
+
+def load_account_by_session(session_name):
+    if not session_name:
+        return {}
+
+    result = (
+        supabase.table("telegram_accounts")
+        .select("*")
+        .eq("session_name", session_name)
+        .limit(1)
+        .execute()
+    )
+
+    if result.data:
+        return result.data[0]
+
+    return {}
+
+
+def group_by_account(messages):
+    accounts = defaultdict(list)
+
+    for msg in messages:
+        account_key = msg.get("account_session_name") or "unknown"
+        accounts[str(account_key)].append(msg)
+
+    return accounts
+
+
+def group_by_dialog(messages):
+    dialogs = defaultdict(list)
+
+    for msg in messages:
+        dialog_key = (
+            msg.get("dialog_username")
+            or msg.get("dialog_id")
+            or msg.get("chat_id")
+            or "unknown"
+        )
+
+        dialogs[str(dialog_key)].append(msg)
+
+    return dialogs
+
+
+def is_deleted_dialog(dialog_messages):
+    for msg in dialog_messages:
+        if msg.get("chat_deleted") is True:
+            return True
+
+    return False
+
+
+def build_dialog_context(dialog_messages, edge=2, middle=2, max_len=150):
+    msgs = [m for m in dialog_messages if m.get("text")]
+    if len(msgs) <= edge * 2 + middle:
+        picked = msgs
+    else:
+        mid = len(msgs) // 2
+        start = mid - middle // 2
+        picked = msgs[:edge] + [None] + msgs[start:start + middle] + [None] + msgs[-edge:]
+
+    lines = []
+    for m in picked:
+        if m is None:
+            lines.append("   …")
+            continue
+        who = "👤" if m.get("direction") == "incoming" else "💬"
+        text = (m.get("text") or "").replace("\n", " ")
+        if len(text) > max_len:
+            text = text[:max_len] + "…"
+        lines.append(f"   {who} {text}")
+    return "\n".join(lines) or "   -"
+
+
+def analyze_dialog(username, dialog_messages):
+    incoming = [
+        msg for msg in dialog_messages
+        if msg.get("direction") == "incoming"
+    ]
+
+    outgoing = [
+        msg for msg in dialog_messages
+        if msg.get("direction") == "outgoing"
+    ]
+
+    deleted = is_deleted_dialog(dialog_messages)
+
+    all_texts = [
+        (msg.get("text") or "").lower()
+        for msg in dialog_messages
+        if msg.get("text")
+    ]
+
+    last_msg = dialog_messages[-1] if dialog_messages else {}
+    last_text = last_msg.get("text") or "-"
+    last_direction = last_msg.get("direction")
+
+    joined_text = " ".join(all_texts)
+
+    price_words = [
+        "цена", "сколько", "стоимость", "прайс", "$", "доллар",
+        "оплата", "заплатить", "скок"
+    ]
+
+    time_words = [
+        "когда", "во сколько", "сегодня", "завтра", "час",
+        "время", "сейчас"
+    ]
+
+    interest_words = [
+        "интересно", "хочу", "можно", "давай", "подходит",
+        "ок", "супер", "норм", "подойдет"
+    ]
+
+    reject_words = [
+        "дорого", "не интересно", "не подходит", "подумаю",
+        "потом", "нет", "не хочу"
+    ]
+
+    asked_price = any(word in joined_text for word in price_words)
+    asked_time = any(word in joined_text for word in time_words)
+    has_interest = any(word in joined_text for word in interest_words)
+    has_reject = any(word in joined_text for word in reject_words)
+
+    if deleted:
+        diagnosis = "Удалил чат"
+        detail = f"Чат стал недоступен. Последнее сообщение: {last_text[:120]}"
+        result = "Потерян"
+        manager_action = "Не требуется"
+
+    elif incoming and not outgoing:
+        diagnosis = "Не ответили"
+        detail = f"Пользователь написал, но ответа не было. Последнее: {last_text[:120]}"
+        result = "Нужен ответ"
+        manager_action = "Срочно ответить"
+
+    elif outgoing and not incoming:
+        diagnosis = "Только исходящие"
+        detail = f"Менеджер написал первым, ответа пока нет. Последнее: {last_text[:120]}"
+        result = "Ждём ответа"
+        manager_action = "Подождать / написать позже"
+
+    elif last_direction == "incoming":
+        diagnosis = "Клиент ждёт ответ"
+        detail = f"Последнее сообщение от клиента: {last_text[:120]}"
+        result = "Нужен ответ"
+        manager_action = "Ответить"
+
+    elif has_reject:
+        diagnosis = "Сомневается / отказ"
+        detail = f"В диалоге есть сомнение или отказ. Последнее: {last_text[:120]}"
+        result = "Под вопросом"
+        manager_action = "Дожать мягко / уточнить причину"
+
+    elif asked_price and asked_time:
+        diagnosis = "Горячий интерес"
+        detail = f"Спрашивал цену и время. Последнее: {last_text[:120]}"
+        result = "Хороший лид"
+        manager_action = "Довести до встречи"
+
+    elif asked_price:
+        diagnosis = "Интерес по цене"
+        detail = f"Пользователь спрашивал цену/условия. Последнее: {last_text[:120]}"
+        result = "Есть интерес"
+        manager_action = "Уточнить и закрыть на действие"
+
+    elif asked_time:
+        diagnosis = "Интерес по времени"
+        detail = f"Пользователь спрашивал по времени. Последнее: {last_text[:120]}"
+        result = "Есть интерес"
+        manager_action = "Предложить конкретное время"
+
+    elif has_interest:
+        diagnosis = "Заинтересован"
+        detail = f"В диалоге есть позитивный интерес. Последнее: {last_text[:120]}"
+        result = "Перспективный"
+        manager_action = "Продолжить диалог"
+
+    else:
+        diagnosis = "Обычный диалог"
+        detail = f"Входящих: {len(incoming)}, исходящих: {len(outgoing)}. Последнее: {last_text[:120]}"
+        result = "В работе"
+        manager_action = "Проверить вручную"
+
+    return {
+        "username": username,
+        "deleted": deleted,
+        "diagnosis": diagnosis,
+        "detail": detail,
+        "result": result,
+        "manager_action": manager_action,
+    }
+
+
+def build_account_report_text(account_session_name, messages, start_time, end_time, shift_name, detailed=False):
+    import asyncio
+    import concurrent.futures
+
+    account_data = load_account_by_session(account_session_name)
+
+    all_messages = fetch_messages_paginated(
+        start_time=start_time,
+        end_time=end_time,
+        account_session_name=account_session_name,
+    )
+
+    incoming_messages = [
+        msg for msg in all_messages
+        if msg.get("direction") == "incoming"
+    ]
+
+    def first_value(*keys, default="-"):
+        for key in keys:
+            for msg in incoming_messages:
+                value = msg.get(key)
+                if value not in (None, "", "NULL"):
+                    return value
+        for key in keys:
+            for msg in all_messages:
+                value = msg.get(key)
+                if value not in (None, "", "NULL"):
+                    return value
+        for key in keys:
+            value = account_data.get(key)
+            if value not in (None, "", "NULL"):
+                return value
+        return default
+
+    # Живое значение из telegram_accounts важнее копии в сообщениях —
+    # иначе после смены ника отчёт покажет старый.
+    account_username = (
+        account_data.get("username")
+        or first_value("account_username")
+    )
+    ad_name = first_value("ad_name")
+    operator_name = first_value("operator_name", "pc_name")
+    phone = first_value("phone")
+
+    def make_dialog_key(msg):
+        dialog_id = str(msg.get("dialog_id") or msg.get("chat_id") or "")
+        dialog_username = msg.get("dialog_username") or msg.get("username")
+        dialog_name = msg.get("dialog_name") or msg.get("chat_name") or msg.get("sender_name")
+        return (
+            dialog_id
+            or dialog_username
+            or dialog_name
+            or str(msg.get("id"))
+        )
+
+    dialog_messages_map = defaultdict(list)
+    for msg in all_messages:
+        dialog_key = make_dialog_key(msg)
+        if dialog_key:
+            dialog_messages_map[str(dialog_key)].append(msg)
+
+    leads = {}
+
+    for msg in incoming_messages:
+        dialog_id = str(msg.get("dialog_id") or msg.get("chat_id") or "")
+        dialog_username = msg.get("dialog_username") or msg.get("username")
+        dialog_name = msg.get("dialog_name") or msg.get("chat_name") or msg.get("sender_name")
+
+        if dialog_id in ("777000", "42777", "0"):
+            continue
+
+        uname = str(dialog_username or "").lower()
+        if uname.endswith("bot"):
+            continue
+
+        dialog_key = make_dialog_key(msg)
+        if not dialog_key:
+            continue
+
+        dialog_key = str(dialog_key)
+        msg_date = parse_dt(msg.get("message_date")) or parse_dt(msg.get("created_at"))
+
+        if dialog_key not in leads:
+            leads[dialog_key] = {
+                "dialog_id": dialog_id,
+                "username": dialog_username,
+                "name": dialog_name,
+                "last_text": msg.get("text") or "",
+                "last_date": msg_date,
+                "deleted": bool(msg.get("chat_deleted")),
+            }
+        else:
+            old_date = leads[dialog_key].get("last_date")
+            if old_date is None or (msg_date is not None and msg_date >= old_date):
+                leads[dialog_key]["last_text"] = msg.get("text") or ""
+                leads[dialog_key]["last_date"] = msg_date
+                leads[dialog_key]["username"] = dialog_username or leads[dialog_key].get("username")
+                leads[dialog_key]["name"] = dialog_name or leads[dialog_key].get("name")
+                leads[dialog_key]["deleted"] = bool(msg.get("chat_deleted"))
+
+    # ── Лид — только тот, кто впервые написал этому аккаунту в эту смену ──
+    first_seen = {}
+    ids = [str(l["dialog_id"]) for l in leads.values() if l.get("dialog_id")]
+    for i in range(0, len(ids), 200):
+        try:
+            res = (supabase.table("lead_registry").select("dialog_id, first_seen_at")
+                   .eq("account_session_name", account_session_name)
+                   .in_("dialog_id", ids[i:i + 200]).execute())
+            for row in res.data or []:
+                first_seen[str(row["dialog_id"])] = parse_dt(row["first_seen_at"])
+        except Exception as e:
+            print("⚠️ lead_registry read error:", e, flush=True)
+
+    repeat_count = 0
+    new_leads = {}
+    for key, lead in leads.items():
+        fs = first_seen.get(str(lead.get("dialog_id") or ""))
+        if fs is not None and fs < start_time:
+            repeat_count += 1
+            continue
+        new_leads[key] = lead
+    leads = new_leads
+
+    total_written = len(leads)
+    deleted_chats = sum(1 for lead in leads.values() if lead.get("deleted") is True)
+    remaining = max(0, total_written - deleted_chats)
+
+    # Дата смены — по её началу. У ночной конец приходится на следующий
+    # день, и отчёт за ночь 10-го подписывался 11-м.
+    report_date = start_time.astimezone(KYIV_TZ).strftime("%d.%m")
+
+    report = []
+    report.append(f"Дата: {report_date}")
+    report.append("День" if "Дневная" in shift_name else "Ночь")
+    report.append(f"Реклама: {ad_name}")
+    report.append(f"ПК: {operator_name}")
+    report.append(f"Юзер: @{account_username}")
+    report.append("")
+    report.append(f"Написало: {total_written}")
+    report.append(f"Удалили чат: {deleted_chats}")
+    report.append(f"Осталось: {remaining}")
+    report.append(f"Повторные (не в счёт): {repeat_count}")
+
+    if not detailed:
+        return "\n".join(report)
+
+    report.append("")
+
+    if not leads:
+        report.append("За этот период новых диалогов нет.")
+        return "\n".join(report)
+
+    # ── Параллельный Groq-анализ всех диалогов одновременно ──────────────────
+
+    def analyze_one_sync(i, dialog_key, lead):
+        username = lead.get("username")
+        dialog_id = lead.get("dialog_id")
+        name = lead.get("name") or "-"
+
+        if username:
+            user_line = f"@{username}"
+            analyze_name = username
+        elif dialog_id:
+            user_line = f"ID {dialog_id}"
+            analyze_name = dialog_id
+        else:
+            user_line = name
+            analyze_name = name
+
+        dialog_messages = dialog_messages_map.get(dialog_key) or []
+
+        try:
+            ai_result = analyze_dialog(analyze_name, dialog_messages)
+        except Exception as e:
+            print("❌ GROQ ANALYZE ERROR:", e)
+            ai_result = {
+                "diagnosis": "Ошибка анализа",
+                "detail": "Groq не смог обработать диалог",
+                "result": "Проверить вручную",
+                "manager_action": "Открыть чат и проверить",
+            }
+
+        lines = []
+        lines.append(f"{i}. {user_line}")
+        lines.append(f"Имя: {name}")
+        lines.append(f"Удалил чат: {'Да' if lead.get('deleted') else 'Нет'}")
+        lines.append(f"Статус: {ai_result.get('diagnosis')} → {ai_result.get('manager_action')}")
+        lines.append(f"Сообщений: {len(dialog_messages)}")
+        lines.append("Переписка:")
+        lines.append(build_dialog_context(dialog_messages))
+        lines.append("")
+        return (i, "\n".join(lines))
+
+    leads_list = list(leads.items())
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [
+            pool.submit(analyze_one_sync, i, dialog_key, lead)
+            for i, (dialog_key, lead) in enumerate(leads_list, start=1)
+        ]
+        results = [f.result() for f in concurrent.futures.as_completed(futures)]
+
+    results.sort(key=lambda x: x[0])
+
+    for _, block in results:
+        report.append(block)
+
+    return "\n".join(report)
+
+
+def get_current_shift_period(now=None):
+    if now is None:
+        now = datetime.now(KYIV_TZ)
+
+    day_start = now.replace(hour=8, minute=40, second=0, microsecond=0)
+    night_start = now.replace(hour=20, minute=40, second=0, microsecond=0)
+
+    if day_start <= now < night_start:
+        return {
+            "shift_name": "Дневная смена",
+            "start_time": day_start,
+            "end_time": night_start,
+        }
+
+    if now >= night_start:
+        return {
+            "shift_name": "Ночная смена",
+            "start_time": night_start,
+            "end_time": day_start + timedelta(days=1),
+        }
+
+    yesterday_night = night_start - timedelta(days=1)
+
+    return {
+        "shift_name": "Ночная смена",
+        "start_time": yesterday_night,
+        "end_time": day_start,
+    }
+
+
+def build_reports_by_accounts(start_time=None, end_time=None, shift_name=None, detailed=False, session_name_filter=None):
+    if start_time is None or end_time is None:
+        period = get_current_shift_period()
+        start_time = period["start_time"]
+        end_time = period["end_time"]
+        shift_name = period["shift_name"]
+
+    messages = load_messages(start_time=start_time, end_time=end_time)
+    accounts = group_by_account(messages)
+    if session_name_filter:
+        accounts = {k: v for k, v in accounts.items() if k == session_name_filter}
+
+    reports = []
+
+    for account_session_name, account_messages in accounts.items():
+        text = build_account_report_text(
+            account_session_name=account_session_name,
+            messages=account_messages,
+            start_time=start_time,
+            end_time=end_time,
+            shift_name=shift_name,
+            detailed=detailed,
+        )
+
+        reports.append({
+            "session_name": account_session_name,
+            "text": text,
+        })
+
+    return reports
+
+
+def build_report(start_time=None, end_time=None, shift_name=None, detailed=True):
+    reports = build_reports_by_accounts(
+        start_time=start_time,
+        end_time=end_time,
+        shift_name=shift_name,
+        detailed=detailed,
+    )
+
+    if not reports:
+        return "За этот период новых диалогов нет."
+
+    return "\n\n".join(report["text"] for report in reports)
