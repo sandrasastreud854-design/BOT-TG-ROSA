@@ -758,61 +758,78 @@ async def test_poll(message: types.Message):
 
 @dp.message(Command("pollall"))
 async def poll_all_operators(message: types.Message):
-    """[ТЕСТ] Разослать всем подключённым операторам опрос заходов/броней."""
+    """[ТЕСТ] Разослать опрос заходов/броней на все подключённые анкеты."""
     if message.chat.type != "private":
         return
 
     from supabase_db import supabase
     import time as _time
 
+    # Подключённые анкеты
     try:
-        res = await asyncio.to_thread(
-            lambda: supabase.table("operators").select("*").eq("active", True).execute()
+        acc_res = await asyncio.to_thread(
+            lambda: supabase.table("telegram_accounts")
+            .select("session_name, username, pc_name")
+            .eq("status", "active").eq("active", True).execute()
         )
-        operators = res.data or []
+        accounts = acc_res.data or []
     except Exception as e:
-        await message.answer(f"❌ Не смог прочитать операторов: {e}")
+        await message.answer(f"❌ Не смог прочитать анкеты: {e}")
         return
 
-    if not operators:
-        await message.answer("❌ Нет активных операторов. Добавь: добавить оператора @username ПК:D3")
+    if not accounts:
+        await message.answer("❌ Нет активных подключённых анкет.")
+        return
+
+    # username -> telegram_id из тех, кто писал боту
+    try:
+        ku_res = await asyncio.to_thread(
+            lambda: supabase.table("known_users").select("telegram_id, username").execute()
+        )
+        id_by_username = {
+            (r.get("username") or "").lower(): r.get("telegram_id")
+            for r in (ku_res.data or []) if r.get("username")
+        }
+    except Exception as e:
+        await message.answer(f"❌ Не смог прочитать known_users: {e}")
         return
 
     slot_id = f"test_pollall_{int(_time.time())}"
-    sent, failed = 0, []
+    sent, not_written, failed = 0, [], []
 
-    for op in operators:
-        tg_id = op.get("telegram_id")
-        pc_name = op.get("pc_name", "-")
-        username = op.get("username", "")
+    for acc in accounts:
+        uname = (acc.get("username") or "").lower()
+        pc_name = acc.get("pc_name", "-")
+        tg_id = id_by_username.get(uname)
+
         if not tg_id:
+            not_written.append(f"@{acc.get('username') or '-'} (ПК {pc_name})")
             continue
 
         operator_poll_state[tg_id] = {
-            "zahody": 0,
-            "broni": 0,
-            "razvoroty": 0,
-            "waiting_for": None,
-            "slot": slot_id,
-            "pc_name": pc_name,
+            "zahody": 0, "broni": 0, "razvoroty": 0,
+            "waiting_for": None, "slot": slot_id, "pc_name": pc_name,
         }
 
         try:
             await bot.send_message(
                 chat_id=tg_id,
                 text=(
-                    f"🧪 [ТЕСТ] Отметь свою статистику по ПК: {pc_name}\n\n"
+                    f"🧪 [ТЕСТ] Отметь статистику смены (ПК: {pc_name})\n\n"
                     "Нажми кнопку → введи цифру → нажми ✅ Готово"
                 ),
                 reply_markup=build_operator_keyboard()
             )
             sent += 1
         except Exception as e:
-            failed.append(f"@{username} ({tg_id}): {e}")
+            failed.append(f"@{acc.get('username') or '-'}: {e}")
 
-    lines = [f"✅ Разослал опрос {sent} операторам."]
+    lines = [f"✅ Отправил опрос на {sent} анкет."]
+    if not_written:
+        lines.append(f"\n✍️ Ещё не писали боту ({len(not_written)}) — пусть напишут боту /start:")
+        lines += not_written
     if failed:
-        lines.append(f"\n❌ Не дошло ({len(failed)}):")
+        lines.append(f"\n❌ Ошибка отправки ({len(failed)}):")
         lines += failed
     await message.answer("\n".join(lines))
 
