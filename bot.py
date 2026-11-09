@@ -803,7 +803,9 @@ async def poll_all_operators(message: types.Message):
         await message.answer("❌ Нет активных подключённых анкет.")
         return
 
-    slot_id = f"test_pollall_{int(_time.time())}"
+    from datetime import datetime as _dt
+    from zoneinfo import ZoneInfo as _ZI
+    slot_id = "pollall__" + _dt.now(_ZI("Europe/Kyiv")).strftime("%Y-%m-%d_%H:%M")
     sent, no_id, not_written = 0, [], []
 
     for acc in accounts:
