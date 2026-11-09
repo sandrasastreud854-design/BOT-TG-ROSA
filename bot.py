@@ -755,6 +755,67 @@ async def test_poll(message: types.Message):
         reply_markup=build_operator_keyboard()
     )
 
+
+@dp.message(Command("pollall"))
+async def poll_all_operators(message: types.Message):
+    """[ТЕСТ] Разослать всем подключённым операторам опрос заходов/броней."""
+    if message.chat.type != "private":
+        return
+
+    from supabase_db import supabase
+    import time as _time
+
+    try:
+        res = await asyncio.to_thread(
+            lambda: supabase.table("operators").select("*").eq("active", True).execute()
+        )
+        operators = res.data or []
+    except Exception as e:
+        await message.answer(f"❌ Не смог прочитать операторов: {e}")
+        return
+
+    if not operators:
+        await message.answer("❌ Нет активных операторов. Добавь: добавить оператора @username ПК:D3")
+        return
+
+    slot_id = f"test_pollall_{int(_time.time())}"
+    sent, failed = 0, []
+
+    for op in operators:
+        tg_id = op.get("telegram_id")
+        pc_name = op.get("pc_name", "-")
+        username = op.get("username", "")
+        if not tg_id:
+            continue
+
+        operator_poll_state[tg_id] = {
+            "zahody": 0,
+            "broni": 0,
+            "razvoroty": 0,
+            "waiting_for": None,
+            "slot": slot_id,
+            "pc_name": pc_name,
+        }
+
+        try:
+            await bot.send_message(
+                chat_id=tg_id,
+                text=(
+                    f"🧪 [ТЕСТ] Отметь свою статистику по ПК: {pc_name}\n\n"
+                    "Нажми кнопку → введи цифру → нажми ✅ Готово"
+                ),
+                reply_markup=build_operator_keyboard()
+            )
+            sent += 1
+        except Exception as e:
+            failed.append(f"@{username} ({tg_id}): {e}")
+
+    lines = [f"✅ Разослал опрос {sent} операторам."]
+    if failed:
+        lines.append(f"\n❌ Не дошло ({len(failed)}):")
+        lines += failed
+    await message.answer("\n".join(lines))
+
 @dp.message(lambda m: m.chat.type == "private" and m.from_user.id in operator_poll_state and operator_poll_state[m.from_user.id].get("waiting_for"))
 async def op_stat_count_input(message: types.Message):
     user_id = message.from_user.id
