@@ -151,8 +151,31 @@ def build_report_text(with_ai=False):
     return report_text
 
 
+async def capture_account_id(message: types.Message):
+    """Если пишет подключённая анкета — запоминаем её telegram_id в telegram_accounts."""
+    uname = (message.from_user.username or "").strip()
+    if not uname:
+        return
+    from supabase_db import supabase
+    try:
+        res = await asyncio.to_thread(
+            lambda: supabase.table("telegram_accounts")
+            .select("session_name").eq("username", uname).limit(1).execute()
+        )
+        if res.data:
+            await asyncio.to_thread(
+                lambda: supabase.table("telegram_accounts")
+                .update({"tg_user_id": message.from_user.id})
+                .eq("session_name", res.data[0]["session_name"]).execute()
+            )
+            print(f"✅ tg_user_id: @{uname} -> {message.from_user.id}", flush=True)
+    except Exception as e:
+        print(f"⚠️ capture_account_id error: {e}", flush=True)
+
+
 @dp.message(CommandStart())
 async def start(message: types.Message):
+    await capture_account_id(message)
     try:
         from supabase_db import supabase
         await asyncio.to_thread(
@@ -937,6 +960,8 @@ async def admin_chat(message: types.Message):
     # Каналы и остальное — игнорируем
     if message.chat.type != "private":
         return
+
+    await capture_account_id(message)
 
     text = message.text or ""
 
