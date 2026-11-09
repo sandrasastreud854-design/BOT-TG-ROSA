@@ -241,7 +241,21 @@ async def start_account(account):
 
     client = TelegramClient(StringSession(session_string), API_ID, API_HASH)
 
-    await client.connect()
+    try:
+        await client.connect()
+    except Exception as e:
+        if "AuthKeyDuplicated" in str(type(e)) + str(e):
+            print(f"🗑 Сессия {username} аннулирована (AuthKeyDuplicated) — помечаю unauthorized", flush=True)
+            try:
+                supabase.table("telegram_accounts").update({"status": "unauthorized"}).eq("session_name", account.get("session_name")).execute()
+            except Exception:
+                pass
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+            return None
+        raise
 
     if not await client.is_user_authorized():
         print(f"❌ Аккаунт {username} не авторизован", flush=True)
