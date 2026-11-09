@@ -259,10 +259,11 @@ async def start_account(account):
 
     try:
         supabase.table("telegram_accounts").update({
-            "username": me.username or str(me.id)
+            "username": me.username or str(me.id),
+            "tg_user_id": me.id,
         }).eq("session_name", account.get("session_name")).execute()
     except Exception as e:
-        print(f"⚠️ Не смог обновить username в Supabase: {e}", flush=True)
+        print(f"⚠️ Не смог обновить username/id в Supabase: {e}", flush=True)
 
         print("🔎 Загружаю историю сообщений за текущую смену...", flush=True)
 
