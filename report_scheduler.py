@@ -225,17 +225,19 @@ async def send_shift_report(report_time, target_channel_id=None, poll_slot_id=No
 async def poll_operators(slot_id, channel_id):
     """Опрашивает операторов — пишет им кнопки."""
     try:
-        ops_result = supabase.table("operators").select("*").eq("active", True).execute()
-        operators = ops_result.data or []
+        acc_result = (supabase.table("telegram_accounts")
+                      .select("session_name, username, pc_name, tg_user_id")
+                      .eq("status", "active").eq("active", True).execute())
+        operators = acc_result.data or []
 
         if not operators:
-            print("⚠️ Нет активных операторов для опроса")
+            print("⚠️ Нет подключённых анкет для опроса")
             return
 
         from bot import operator_poll_state, build_operator_keyboard
 
         for op in operators:
-            tg_id = op.get("telegram_id")
+            tg_id = op.get("tg_user_id")
             pc_name = op.get("pc_name", "-")
             username = op.get("username", "")
 
