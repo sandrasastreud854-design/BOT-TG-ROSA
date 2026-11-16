@@ -7,7 +7,7 @@ from supabase_db import supabase
 from telegram_connect import API_ID, API_HASH
 
 SOURCE_HUMAN = {
-    "mamba": "мамбы", "lovelaz": "ловелаза", "badanga": "баданги",
+    "mamba": "мамбы", "lovelaz": "аморуса", "badanga": "баданги",
     "twinby": "твинби", "vznakomstve": "взнакомстве",
 }
 
