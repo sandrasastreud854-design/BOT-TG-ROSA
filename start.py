@@ -6,6 +6,7 @@ from bot import main as bot_main
 from bot import bot, login_state
 from multworker import main as multworker_main
 from report_scheduler import main as report_scheduler_main
+from outreach_sender import outreach_loop
 from telegram_connect import confirm_2fa_by_token
 
 
@@ -273,6 +274,7 @@ async def main():
     asyncio.create_task(safe_run("BOT", bot_main))
     asyncio.create_task(safe_run("MULTWORKER", multworker_main))
     asyncio.create_task(safe_run("REPORT_SCHEDULER", report_scheduler_main))
+    asyncio.create_task(safe_run("OUTREACH", outreach_loop))
 
     print("✅ ALL TASKS CREATED", flush=True)
 
