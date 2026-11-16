@@ -30,12 +30,16 @@ def _mark(row, status, error=None, session=None):
 async def _send_one(row):
     lead = (row.get("lead_tg") or "").lstrip("@")
     source = row.get("source") or ""
-    acc = (supabase.table("telegram_accounts")
-           .select("session_name, session_string, username")
-           .eq("status", "active").eq("active", True)
-           .not_.is_("session_string", "null").limit(1).execute())
+    want = (row.get("sender_username") or "").lstrip("@")
+    q = (supabase.table("telegram_accounts")
+         .select("session_name, session_string, username")
+         .eq("status", "active").eq("active", True)
+         .not_.is_("session_string", "null"))
+    if want:
+        q = q.ilike("username", want)   # писать именно с тг этой анкеты
+    acc = q.limit(1).execute()
     if not acc.data:
-        _mark(row, "failed", "нет активной TG-сессии")
+        _mark(row, "failed", f"нет сессии для @{want}" if want else "нет активной TG-сессии")
         return
     sess = acc.data[0]
     client = TelegramClient(StringSession(sess["session_string"]), API_ID, API_HASH)
@@ -48,6 +52,12 @@ async def _send_one(row):
             entity = await client.get_entity(lead)
         except (UsernameInvalidError, UsernameNotOccupiedError, ValueError):
             _mark(row, "skipped", "ник не найден")
+            return
+        # не писать, если с этим лидом уже был чат в телеге
+        prior = await client.get_messages(entity, limit=1)
+        if prior:
+            _mark(row, "skipped", "уже был чат в телеге")
+            print(f"[OUTREACH] — @{lead}: уже был чат, пропускаю", flush=True)
             return
         await client.send_message(entity, _opener(source))
         _mark(row, "sent", None, sess["session_name"])
