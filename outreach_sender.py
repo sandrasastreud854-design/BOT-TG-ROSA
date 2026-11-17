@@ -1,4 +1,6 @@
-import asyncio, random
+import asyncio, random, time
+_SENDER_COOLDOWN = {}          # username -> до какого time() аккаунт на паузе
+PEER_FLOOD_COOLDOWN = 2 * 3600 # 2 часа отдыха после PEER_FLOOD
 from datetime import datetime, timezone
 from telethon import TelegramClient
 from telethon.sessions import StringSession
@@ -41,6 +43,9 @@ async def _send_one(row):
         _mark(row, "failed", f"нет сессии для @{want}" if want else "нет активной TG-сессии")
         return
     sess = acc.data[0]
+    _ukey = (sess.get("username") or want or "").lower()
+    if _ukey and _SENDER_COOLDOWN.get(_ukey, 0) > time.time():
+        return   # аккаунт на паузе после PEER_FLOOD — лид остаётся pending, допишем позже
     client = TelegramClient(StringSession(sess["session_string"]), API_ID, API_HASH)
     try:
         await client.connect()
@@ -62,8 +67,11 @@ async def _send_one(row):
         _mark(row, "sent", None, sess["session_name"])
         print(f"[OUTREACH] ✓ @{lead} ← @{sess.get('username')} (source={source})", flush=True)
     except PeerFloodError:
-        _mark(row, "failed", "PEER_FLOOD — аккаунт ограничен")
-        print("[OUTREACH] ⚠ PEER_FLOOD — аккаунт режут, притормози", flush=True)
+        _ukey = (sess.get("username") or want or "").lower()
+        if _ukey:
+            _SENDER_COOLDOWN[_ukey] = time.time() + PEER_FLOOD_COOLDOWN
+        _mark(row, "pending", "PEER_FLOOD — аккаунт на паузе, повтор позже")
+        print(f"[OUTREACH] ⚠ PEER_FLOOD @{_ukey} — пауза 2ч, лид остаётся в очереди", flush=True)
     except FloodWaitError as e:
         _mark(row, "pending", f"flood_wait {e.seconds}s")
     except Exception as e:
