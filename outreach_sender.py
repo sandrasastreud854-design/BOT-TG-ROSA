@@ -16,6 +16,24 @@ def _cooldown_active_until(username):
     except Exception:
         pass
     return None
+
+
+_rr_index = 0
+
+def _pick_rotating_account():
+    """Следующий активный аккаунт по кругу, пропуская тех, кто во флуде."""
+    global _rr_index
+    accs = (supabase.table("telegram_accounts")
+            .select("session_name, session_string, username")
+            .eq("status", "active").eq("active", True)
+            .not_.is_("session_string", "null").execute().data or [])
+    free = [a for a in accs
+            if not _cooldown_active_until((a.get("username") or "").lower())]
+    if not free:
+        return None
+    sess = free[_rr_index % len(free)]
+    _rr_index += 1
+    return sess
 from datetime import datetime, timezone
 from telethon import TelegramClient
 from telethon.sessions import StringSession
@@ -47,20 +65,26 @@ async def _send_one(row):
     lead = (row.get("lead_tg") or "").lstrip("@")
     source = row.get("source") or ""
     want = (row.get("sender_username") or "").lstrip("@")
-    q = (supabase.table("telegram_accounts")
-         .select("session_name, session_string, username")
-         .eq("status", "active").eq("active", True)
-         .not_.is_("session_string", "null"))
     if want:
-        q = q.ilike("username", want)   # писать именно с тг этой анкеты
-    acc = q.limit(1).execute()
-    if not acc.data:
-        _mark(row, "failed", f"нет сессии для @{want}" if want else "нет активной TG-сессии")
-        return
-    sess = acc.data[0]
-    _ukey = (sess.get("username") or want or "").lower()
-    if _cooldown_active_until(_ukey):
-        return   # аккаунт на паузе после PEER_FLOOD — лид остаётся pending, допишем позже
+        # фиксированный тг этой карточки
+        acc = (supabase.table("telegram_accounts")
+               .select("session_name, session_string, username")
+               .eq("status", "active").eq("active", True)
+               .not_.is_("session_string", "null")
+               .ilike("username", want).limit(1).execute())
+        if not acc.data:
+            _mark(row, "failed", f"нет сессии для @{want}")
+            return
+        sess = acc.data[0]
+        _ukey = (sess.get("username") or want or "").lower()
+        if _cooldown_active_until(_ukey):
+            return   # фиксированный аккаунт на паузе — лид ждёт
+    else:
+        # ротация: следующий свободный аккаунт по кругу
+        sess = _pick_rotating_account()
+        if not sess:
+            return   # все активные тг во флуде — лид ждёт, допишем когда освободятся
+        _ukey = (sess.get("username") or "").lower()
     client = TelegramClient(StringSession(sess["session_string"]), API_ID, API_HASH)
     try:
         await client.connect()
