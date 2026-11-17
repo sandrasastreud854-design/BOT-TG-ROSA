@@ -105,6 +105,7 @@ async def _send_one(row):
         await client.send_message(entity, _opener(source))
         _mark(row, "sent", None, sess["session_name"])
         print(f"[OUTREACH] ✓ @{lead} ← @{sess.get('username')} (source={source})", flush=True)
+        return True
     except PeerFloodError:
         _ukey = (sess.get("username") or want or "").lower()
         if _ukey:
@@ -133,10 +134,19 @@ async def outreach_loop():
     while True:
         try:
             res = (supabase.table("tg_outreach").select("*")
-                   .eq("status", "pending").order("created_at").limit(5).execute())
-            for row in (res.data or []):
-                await _send_one(row)
-                await asyncio.sleep(random.uniform(40, 90))
+                   .eq("status", "pending").order("created_at").limit(50).execute())
+            rows = res.data or []
+            sent_any = False
+            for row in rows:
+                ok = await _send_one(row)
+                if ok:                       # пауза ТОЛЬКО после реальной отправки
+                    sent_any = True
+                    if (row.get("sender_username") or "").strip():
+                        await asyncio.sleep(random.uniform(40, 90))   # фикс. тг — бережно
+                    else:
+                        await asyncio.sleep(random.uniform(12, 25))   # ротация — можно чаще
+            if not sent_any:                 # все пропущены (флуд/дубли/нет сессий) — ждём
+                await asyncio.sleep(60)
         except Exception as e:
             print(f"[OUTREACH] loop error: {e}", flush=True)
-        await asyncio.sleep(30)
+            await asyncio.sleep(30)
