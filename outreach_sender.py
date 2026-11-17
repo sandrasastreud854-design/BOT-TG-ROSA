@@ -6,12 +6,11 @@ from telethon.errors import PeerFloodError, FloodWaitError, UsernameInvalidError
 from supabase_db import supabase
 from telegram_connect import API_ID, API_HASH
 
-SOURCE_HUMAN = {
-    "mamba": "мамбы", "lovelaz": "аморуса", "badanga": "баданги",
-    "twinby": "твинби", "vznakomstve": "взнакомстве",
-}
+SOURCE_HUMAN = {"mamba": "мамбы", "lovelaz": "аморуса", "badanga": "баданги", "twinby": "твинби", "vznakomstve": "взнакомстве", "soderganki": "содержанок"}
 
 def _opener(source: str) -> str:
+    if (source or "").lower() == "soderganki":
+        return "Приветик с содержанки, встретимся ?"
     place = SOURCE_HUMAN.get((source or "").lower(), "сайта")
     hello = random.choice(["привет", "приветик", "хай", "привет)"])
     return f"{hello}, с {place} 🙂"
