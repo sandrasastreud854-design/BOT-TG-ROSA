@@ -1,6 +1,21 @@
-import asyncio, random, time
-_SENDER_COOLDOWN = {}          # username -> до какого time() аккаунт на паузе
-PEER_FLOOD_COOLDOWN = 2 * 3600 # 2 часа отдыха после PEER_FLOOD
+import asyncio, random
+from datetime import timedelta
+PEER_FLOOD_COOLDOWN_HRS = 2    # часов паузы после PEER_FLOOD
+
+def _cooldown_active_until(username):
+    """ISO-время конца паузы, если аккаунт сейчас во флуде; иначе None."""
+    if not username:
+        return None
+    try:
+        r = (supabase.table("sender_cooldown").select("until_ts")
+             .eq("username", username).limit(1).execute())
+        if r.data:
+            u = str(r.data[0]["until_ts"]).replace("Z", "+00:00")
+            if datetime.fromisoformat(u) > datetime.now(timezone.utc):
+                return r.data[0]["until_ts"]
+    except Exception:
+        pass
+    return None
 from datetime import datetime, timezone
 from telethon import TelegramClient
 from telethon.sessions import StringSession
@@ -44,7 +59,7 @@ async def _send_one(row):
         return
     sess = acc.data[0]
     _ukey = (sess.get("username") or want or "").lower()
-    if _ukey and _SENDER_COOLDOWN.get(_ukey, 0) > time.time():
+    if _cooldown_active_until(_ukey):
         return   # аккаунт на паузе после PEER_FLOOD — лид остаётся pending, допишем позже
     client = TelegramClient(StringSession(sess["session_string"]), API_ID, API_HASH)
     try:
@@ -69,9 +84,16 @@ async def _send_one(row):
     except PeerFloodError:
         _ukey = (sess.get("username") or want or "").lower()
         if _ukey:
-            _SENDER_COOLDOWN[_ukey] = time.time() + PEER_FLOOD_COOLDOWN
+            _until = (datetime.now(timezone.utc) + timedelta(hours=PEER_FLOOD_COOLDOWN_HRS)).isoformat()
+            try:
+                supabase.table("sender_cooldown").upsert({
+                    "username": _ukey, "until_ts": _until, "reason": "PEER_FLOOD",
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }).execute()
+            except Exception as _e:
+                print(f"[OUTREACH] cooldown upsert error: {_e}", flush=True)
         _mark(row, "pending", "PEER_FLOOD — аккаунт на паузе, повтор позже")
-        print(f"[OUTREACH] ⚠ PEER_FLOOD @{_ukey} — пауза 2ч, лид остаётся в очереди", flush=True)
+        print(f"[OUTREACH] ⚠ PEER_FLOOD @{_ukey} — пауза {PEER_FLOOD_COOLDOWN_HRS}ч, лид в очереди", flush=True)
     except FloodWaitError as e:
         _mark(row, "pending", f"flood_wait {e.seconds}s")
     except Exception as e:
